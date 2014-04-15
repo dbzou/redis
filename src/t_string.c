@@ -122,23 +122,27 @@ void setCommand(redisClient *c) {
             return;
         }
     }
-
-    c->argv[2] = tryObjectEncoding(c->argv[2]);
+	//REDIS_TRIE do not need to try encoding key
+	if (c->argv[1]->notused != REDIS_TRIE_FLAG)
+		c->argv[2] = tryObjectEncoding(c->argv[2]);
     setGenericCommand(c,flags,c->argv[1],c->argv[2],expire,unit,NULL,NULL);
 }
 
 void setnxCommand(redisClient *c) {
-    c->argv[2] = tryObjectEncoding(c->argv[2]);
+	if (c->argv[1]->notused != REDIS_TRIE_FLAG)
+		c->argv[2] = tryObjectEncoding(c->argv[2]);
     setGenericCommand(c,REDIS_SET_NX,c->argv[1],c->argv[2],NULL,0,shared.cone,shared.czero);
 }
 
 void setexCommand(redisClient *c) {
-    c->argv[3] = tryObjectEncoding(c->argv[3]);
+	if (c->argv[1]->notused != REDIS_TRIE_FLAG)
+		c->argv[3] = tryObjectEncoding(c->argv[3]);
     setGenericCommand(c,REDIS_SET_NO_FLAGS,c->argv[1],c->argv[3],c->argv[2],UNIT_SECONDS,NULL,NULL);
 }
 
 void psetexCommand(redisClient *c) {
-    c->argv[3] = tryObjectEncoding(c->argv[3]);
+	if (c->argv[1]->notused != REDIS_TRIE_FLAG)
+		c->argv[3] = tryObjectEncoding(c->argv[3]);
     setGenericCommand(c,REDIS_SET_NO_FLAGS,c->argv[1],c->argv[3],c->argv[2],UNIT_MILLISECONDS,NULL,NULL);
 }
 
@@ -163,7 +167,8 @@ void getCommand(redisClient *c) {
 
 void getsetCommand(redisClient *c) {
     if (getGenericCommand(c) == REDIS_ERR) return;
-    c->argv[2] = tryObjectEncoding(c->argv[2]);
+	if (c->argv[1]->notused != REDIS_TRIE_FLAG)
+		c->argv[2] = tryObjectEncoding(c->argv[2]);
     setKey(c->db,c->argv[1],c->argv[2]);
     notifyKeyspaceEvent(REDIS_NOTIFY_STRING,"set",c->argv[1],c->db->id);
     server.dirty++;

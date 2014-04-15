@@ -54,6 +54,7 @@
 #include "ae.h"      /* Event driven programming library */
 #include "sds.h"     /* Dynamic safe strings */
 #include "dict.h"    /* Hash tables */
+#include "tdict.h"   /* Trie trees */
 #include "adlist.h"  /* Linked lists */
 #include "zmalloc.h" /* total memory usage aware version of malloc/free */
 #include "anet.h"    /* Networking the easy way */
@@ -167,6 +168,9 @@
 #define REDIS_SET 2
 #define REDIS_ZSET 3
 #define REDIS_HASH 4
+#define REDIS_TRIE 5
+
+#define REDIS_TRIE_FLAG 1				/* set notused of robj */
 
 /* Objects encoding. Some kind of objects like Strings and Hashes can be
  * internally represented in multiple ways. The 'encoding' field of the object
@@ -179,6 +183,7 @@
 #define REDIS_ENCODING_ZIPLIST 5 /* Encoded as ziplist */
 #define REDIS_ENCODING_INTSET 6  /* Encoded as intset */
 #define REDIS_ENCODING_SKIPLIST 7  /* Encoded as skiplist */
+#define REDIS_ENCODING_TRIE 8  /* Encoded as trie */
 
 /* Defines related to the dump file format. To store 32 bits lengths for short
  * keys requires a lot of space, so we check the most significant 2 bits of
@@ -397,6 +402,7 @@ typedef struct redisObject {
 
 typedef struct redisDb {
     dict *dict;                 /* The keyspace for this DB */
+    trie *trie;                 /* The trie keyspace for this DB */ 
     dict *expires;              /* Timeout of keys with a timeout set */
     dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP) */
     dict *ready_keys;           /* Blocked keys that received a PUSH */
@@ -861,6 +867,15 @@ typedef struct {
     dictEntry *de;
 } hashTypeIterator;
 
+typedef struct {
+	robj *subject;
+	int encoding;
+
+	unsigned char *fptr, *vptr;
+
+	trieIterator ti;
+} trieTypeIterator;
+
 #define REDIS_HASH_KEY 1
 #define REDIS_HASH_VALUE 2
 
@@ -1315,6 +1330,33 @@ void hmsetCommand(redisClient *c);
 void hmgetCommand(redisClient *c);
 void hdelCommand(redisClient *c);
 void hlenCommand(redisClient *c);
+/* trie Commands prototypes start */
+void tsetCommand(redisClient *c);
+void tsetnxCommand(redisClient *c);
+void tsetexCommand(redisClient *c);
+void ptsetexCommand(redisClient *c);
+//void tmsetCommand(redisClient *c);
+//void tmsetnxCommand(redisClient *c);
+void tgetCommand(redisClient *c);
+void tgetsetCommand(redisClient *c);
+//void tmgetCommand(redisClient *c);
+void tdelCommand(redisClient *c);
+void texistsCommand(redisClient *c);
+void thsetCommand(redisClient *c);
+void thsetnxCommand(redisClient *c);
+void thincrbyCommand(redisClient *c);
+void thincrbyfloatCommand(redisClient *c);
+void thgetCommand(redisClient *c);
+void thmsetCommand(redisClient *c);
+void thmgetCommand(redisClient *c);
+void thdelCommand(redisClient *c);
+void thlenCommand(redisClient *c);
+void thexistsCommand(redisClient *c);
+void tkeysCommand(redisClient *c);
+void thkeysCommand(redisClient *c);
+void thvalsCommand(redisClient *c);
+void thgetallCommand(redisClient *c);
+/* trie Commands prototypes end */
 void zremrangebyrankCommand(redisClient *c);
 void zunionstoreCommand(redisClient *c);
 void zinterstoreCommand(redisClient *c);

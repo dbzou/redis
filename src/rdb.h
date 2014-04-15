@@ -38,7 +38,7 @@
 
 /* The current RDB version. When the format changes in a way that is no longer
  * backward compatible this number gets incremented. */
-#define REDIS_RDB_VERSION 6
+#define REDIS_RDB_VERSION 7
 
 /* Defines related to the dump file format. To store 32 bits lengths for short
  * keys requires a lot of space, so we check the most significant 2 bits of
@@ -75,6 +75,8 @@
 #define REDIS_RDB_TYPE_ZSET   3
 #define REDIS_RDB_TYPE_HASH   4
 
+#define REDIS_RDB_FLAG_TRIE 1
+#define REDIS_RDB_TYPE_TRIEOFFSET 128
 /* Object types for encoded objects. */
 #define REDIS_RDB_TYPE_HASH_ZIPMAP    9
 #define REDIS_RDB_TYPE_LIST_ZIPLIST  10
@@ -83,7 +85,7 @@
 #define REDIS_RDB_TYPE_HASH_ZIPLIST  13
 
 /* Test if a type is an object type. */
-#define rdbIsObjectType(t) ((t >= 0 && t <= 4) || (t >= 9 && t <= 13))
+#define rdbIsObjectType(t) ((t >= 0 && t <= 4) || (t >= 9 && t <= 13) || (t >= 128 && t <= 132) || (t >= 137 && t <= 141))
 
 /* Special RDB opcodes (saved/loaded with rdbSaveType/rdbLoadType). */
 #define REDIS_RDB_OPCODE_EXPIRETIME_MS 252

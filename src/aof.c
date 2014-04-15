@@ -408,15 +408,15 @@ sds catAppendOnlyExpireAtCommand(sds buf, struct redisCommand *cmd, robj *key, r
     /* Make sure we can use strtol */
     seconds = getDecodedObject(seconds);
     when = strtoll(seconds->ptr,NULL,10);
-    /* Convert argument into milliseconds for EXPIRE, SETEX, EXPIREAT */
+    /* Convert argument into milliseconds for EXPIRE, SETEX, EXPIREAT, TSETEX */
     if (cmd->proc == expireCommand || cmd->proc == setexCommand ||
-        cmd->proc == expireatCommand)
+        cmd->proc == expireatCommand || cmd->proc == tsetexCommand)
     {
         when *= 1000;
     }
-    /* Convert into absolute time for EXPIRE, PEXPIRE, SETEX, PSETEX */
+    /* Convert into absolute time for EXPIRE, PEXPIRE, SETEX, PSETEX, PTSETEX */
     if (cmd->proc == expireCommand || cmd->proc == pexpireCommand ||
-        cmd->proc == setexCommand || cmd->proc == psetexCommand)
+        cmd->proc == setexCommand || cmd->proc == psetexCommand || cmd->proc == ptsetexCommand)
     {
         when += mstime();
     }
@@ -450,9 +450,13 @@ void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int a
         cmd->proc == expireatCommand) {
         /* Translate EXPIRE/PEXPIRE/EXPIREAT into PEXPIREAT */
         buf = catAppendOnlyExpireAtCommand(buf,cmd,argv[1],argv[2]);
-    } else if (cmd->proc == setexCommand || cmd->proc == psetexCommand) {
+    } else if (cmd->proc == setexCommand || cmd->proc == psetexCommand
+    	|| cmd->proc == tsetexCommand || cmd->proc == ptsetexCommand) {
         /* Translate SETEX/PSETEX to SET and PEXPIREAT */
-        tmpargv[0] = createStringObject("SET",3);
+        if (cmd->proc == tsetexCommand || cmd->proc == ptsetexCommand)
+        	tmpargv[0] = createStringObject("TSET",3);
+        else
+        	tmpargv[0] = createStringObject("SET",3);
         tmpargv[1] = argv[1];
         tmpargv[2] = argv[3];
         buf = catAppendOnlyGenericCommand(buf,3,tmpargv);

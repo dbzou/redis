@@ -428,41 +428,51 @@ int rdbLoadDoubleValue(rio *rdb, double *val) {
 
 /* Save the object type of object "o". */
 int rdbSaveObjectType(rio *rdb, robj *o) {
+	unsigned char realtype = 0;
+	//store trie type
+	if (o->notused == REDIS_RDB_FLAG_TRIE) {
+		realtype = REDIS_RDB_TYPE_TRIEOFFSET;
+	}
     switch (o->type) {
     case REDIS_STRING:
-        return rdbSaveType(rdb,REDIS_RDB_TYPE_STRING);
+		realtype |= REDIS_RDB_TYPE_STRING;
+		break;
     case REDIS_LIST:
         if (o->encoding == REDIS_ENCODING_ZIPLIST)
-            return rdbSaveType(rdb,REDIS_RDB_TYPE_LIST_ZIPLIST);
+			realtype |= REDIS_RDB_TYPE_LIST_ZIPLIST;
         else if (o->encoding == REDIS_ENCODING_LINKEDLIST)
-            return rdbSaveType(rdb,REDIS_RDB_TYPE_LIST);
+			realtype |= REDIS_RDB_TYPE_LIST;
         else
             redisPanic("Unknown list encoding");
+		break;
     case REDIS_SET:
         if (o->encoding == REDIS_ENCODING_INTSET)
-            return rdbSaveType(rdb,REDIS_RDB_TYPE_SET_INTSET);
+			realtype |= REDIS_RDB_TYPE_SET_INTSET;
         else if (o->encoding == REDIS_ENCODING_HT)
-            return rdbSaveType(rdb,REDIS_RDB_TYPE_SET);
+			realtype |= REDIS_RDB_TYPE_SET;
         else
             redisPanic("Unknown set encoding");
+		break;
     case REDIS_ZSET:
         if (o->encoding == REDIS_ENCODING_ZIPLIST)
-            return rdbSaveType(rdb,REDIS_RDB_TYPE_ZSET_ZIPLIST);
-        else if (o->encoding == REDIS_ENCODING_SKIPLIST)
-            return rdbSaveType(rdb,REDIS_RDB_TYPE_ZSET);
+			realtype |= REDIS_RDB_TYPE_ZSET_ZIPLIST;
+		else if (o->encoding == REDIS_ENCODING_SKIPLIST)
+			realtype |= REDIS_RDB_TYPE_ZSET;
         else
             redisPanic("Unknown sorted set encoding");
+		break;
     case REDIS_HASH:
         if (o->encoding == REDIS_ENCODING_ZIPLIST)
-            return rdbSaveType(rdb,REDIS_RDB_TYPE_HASH_ZIPLIST);
+			realtype |= REDIS_RDB_TYPE_HASH_ZIPLIST;
         else if (o->encoding == REDIS_ENCODING_HT)
-            return rdbSaveType(rdb,REDIS_RDB_TYPE_HASH);
+			realtype |= REDIS_RDB_TYPE_HASH;
         else
             redisPanic("Unknown hash encoding");
+		break;
     default:
         redisPanic("Unknown object type");
     }
-    return -1; /* avoid warning */
+	return rdbSaveType(rdb,realtype);
 }
 
 /* Use rdbLoadType() to load a TYPE in RDB format, but returns -1 if the
@@ -630,6 +640,8 @@ int rdbSaveKeyValuePair(rio *rdb, robj *key, robj *val,
 int rdbSave(char *filename) {
     dictIterator *di = NULL;
     dictEntry *de;
+	trieIterator *ti = NULL;
+	trieEntry *te;
     char tmpfile[256];
     char magic[10];
     int j;
@@ -655,31 +667,62 @@ int rdbSave(char *filename) {
     for (j = 0; j < server.dbnum; j++) {
         redisDb *db = server.db+j;
         dict *d = db->dict;
-        if (dictSize(d) == 0) continue;
-        di = dictGetSafeIterator(d);
-        if (!di) {
-            fclose(fp);
-            return REDIS_ERR;
-        }
+		trie *t = db->trie;
+		int selectdb = 0;
+        if (dictSize(d) > 0) {
+			di = dictGetSafeIterator(d);
+			if (!di) {
+				fclose(fp);
+				return REDIS_ERR;
+			}
 
-        /* Write the SELECT DB opcode */
-        if (rdbSaveType(&rdb,REDIS_RDB_OPCODE_SELECTDB) == -1) goto werr;
-        if (rdbSaveLen(&rdb,j) == -1) goto werr;
+			/* Write the SELECT DB opcode */
+			if (rdbSaveType(&rdb,REDIS_RDB_OPCODE_SELECTDB) == -1) goto werr;
+			if (rdbSaveLen(&rdb,j) == -1) goto werr;
+			selectdb = 1;
 
-        /* Iterate this DB writing every entry */
-        while((de = dictNext(di)) != NULL) {
-            sds keystr = dictGetKey(de);
-            robj key, *o = dictGetVal(de);
-            long long expire;
+			/* Iterate this DB writing every entry */
+			while((de = dictNext(di)) != NULL) {
+				sds keystr = dictGetKey(de);
+				robj key, *o = dictGetVal(de);
+				long long expire;
             
-            initStaticStringObject(key,keystr);
-            expire = getExpire(db,&key);
-            if (rdbSaveKeyValuePair(&rdb,&key,o,expire,now) == -1) goto werr;
-        }
-        dictReleaseIterator(di);
+				initStaticStringObject(key,keystr);
+				expire = getExpire(db,&key);
+				if (rdbSaveKeyValuePair(&rdb,&key,o,expire,now) == -1) goto werr;
+			}
+			dictReleaseIterator(di);
+		}
+		//save trie
+		if (trieSize(t) > 0) {
+			ti = getTrieIterator(t,DA_POOL_ROOT);
+			if (!ti) {
+				fclose(fp);
+				return REDIS_ERR;
+			}
+
+			if (selectdb == 0) {
+				if (rdbSaveType(&rdb,REDIS_RDB_OPCODE_SELECTDB) == -1) goto werr;
+				if (rdbSaveLen(&rdb,j) == -1) goto werr;
+				selectdb = 1;
+			}
+
+			/* Iterate this DB writing every entry */
+			while((te = trieNext(ti)) != NULL) {
+				sds keystr = trieGetKey(te);
+				robj key, *o = trieGetVal(te);
+				long long expire;
+
+				initStaticStringObject(key,keystr);
+				expire = getExpire(db,&key);
+				o->notused = REDIS_RDB_FLAG_TRIE;//set trie flag
+				if (rdbSaveKeyValuePair(&rdb,&key,o,expire,now) == -1) goto werr;
+			}
+			trieReleaseIterator(ti);
+		}
     }
     di = NULL; /* So that we don't release it again on error. */
-
+	ti = NULL;
     /* EOF opcode */
     if (rdbSaveType(&rdb,REDIS_RDB_OPCODE_EOF) == -1) goto werr;
 
@@ -712,6 +755,7 @@ werr:
     unlink(tmpfile);
     redisLog(REDIS_WARNING,"Write error saving DB on disk: %s", strerror(errno));
     if (di) dictReleaseIterator(di);
+	if (ti) trieReleaseIterator(ti);
     return REDIS_ERR;
 }
 
@@ -1143,8 +1187,19 @@ int rdbLoad(char *filename) {
             db = server.db+dbid;
             continue;
         }
-        /* Read key */
-        if ((key = rdbLoadStringObject(&rdb)) == NULL) goto eoferr;
+
+		//support trie
+		if(type & REDIS_RDB_TYPE_TRIEOFFSET) {
+			/* Read key */
+			if ((key = rdbLoadStringObject(&rdb)) == NULL) goto eoferr;
+			//key->type = REDIS_TRIE;
+			key->notused = REDIS_TRIE_FLAG;
+			type &= ~REDIS_RDB_TYPE_TRIEOFFSET;//restore type
+		} else {
+			/* Read key */
+			if ((key = rdbLoadStringObject(&rdb)) == NULL) goto eoferr;
+		}
+
         /* Read value */
         if ((val = rdbLoadObject(type,&rdb)) == NULL) goto eoferr;
         /* Check if the key already expired. This function is used when loading

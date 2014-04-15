@@ -40,7 +40,19 @@ void SlotToKeyDel(robj *key);
  *----------------------------------------------------------------------------*/
 
 robj *lookupKey(redisDb *db, robj *key) {
-    dictEntry *de = dictFind(db->dict,key->ptr);
+	if (key->notused == REDIS_TRIE_FLAG) {
+		  trieEntry *te = trieFind(db->trie,key->ptr);
+		  if (te) {
+		  	robj *val = trieGetVal(te);
+		  	if (server.rdb_child_pid == -1 && server.aof_child_pid == -1)
+            val->lru = server.lruclock;
+        return val;
+		  }
+		  return NULL;
+	}
+	else
+	{
+		dictEntry *de = dictFind(db->dict,key->ptr);
     if (de) {
         robj *val = dictGetVal(de);
 
@@ -50,9 +62,9 @@ robj *lookupKey(redisDb *db, robj *key) {
         if (server.rdb_child_pid == -1 && server.aof_child_pid == -1)
             val->lru = server.lruclock;
         return val;
-    } else {
-        return NULL;
     }
+    return NULL;
+  }
 }
 
 robj *lookupKeyRead(redisDb *db, robj *key) {
@@ -90,8 +102,13 @@ robj *lookupKeyWriteOrReply(redisClient *c, robj *key, robj *reply) {
  * The program is aborted if the key already exists. */
 void dbAdd(redisDb *db, robj *key, robj *val) {
     sds copy = sdsdup(key->ptr);
-    int retval = dictAdd(db->dict, copy, val);
 
+    int retval;
+	if (key->notused == REDIS_TRIE_FLAG)
+		retval = trieAdd(db->trie, copy, val);
+	else
+		retval = dictAdd(db->dict, copy, val);
+		//printf("Add retval=%d\n",retval);
     redisAssertWithInfo(NULL,key,retval == REDIS_OK);
  }
 
@@ -101,10 +118,17 @@ void dbAdd(redisDb *db, robj *key, robj *val) {
  *
  * The program is aborted if the key was not already present. */
 void dbOverwrite(redisDb *db, robj *key, robj *val) {
-    struct dictEntry *de = dictFind(db->dict,key->ptr);
     
-    redisAssertWithInfo(NULL,key,de != NULL);
-    dictReplace(db->dict, key->ptr, val);
+	if (key->notused == REDIS_TRIE_FLAG) {
+		trieEntry *te = trieFind(db->trie,key->ptr);
+		redisAssertWithInfo(NULL,key,te != NULL);
+		trieReplace(db->trie, te, val);
+	}
+	else {
+		dictEntry *de = dictFind(db->dict,key->ptr);
+		redisAssertWithInfo(NULL,key,de != NULL);
+		dictReplace(db->dict, key->ptr, val);
+	}
 }
 
 /* High level Set operation. This function can be used in order to set
@@ -116,6 +140,7 @@ void dbOverwrite(redisDb *db, robj *key, robj *val) {
 void setKey(redisDb *db, robj *key, robj *val) {
     if (lookupKeyWrite(db,key) == NULL) {
         dbAdd(db,key,val);
+		incrRefCount(key);
     } else {
         dbOverwrite(db,key,val);
     }
@@ -125,13 +150,17 @@ void setKey(redisDb *db, robj *key, robj *val) {
 }
 
 int dbExists(redisDb *db, robj *key) {
-    return dictFind(db->dict,key->ptr) != NULL;
+	if (key->notused == REDIS_TRIE_FLAG)
+		return trieFind(db->trie,key->ptr) != NULL;
+	else//just placeholder
+		return dictFind(db->dict,key->ptr) != NULL;
 }
 
 /* Return a random key, in form of a Redis object.
  * If there are no keys, NULL is returned.
  *
  * The function makes sure to return keys not already expired. */
+//TODO: support trie
 robj *dbRandomKey(redisDb *db) {
     struct dictEntry *de;
 
@@ -159,11 +188,13 @@ int dbDelete(redisDb *db, robj *key) {
     /* Deleting an entry from the expires dict will not free the sds of
      * the key, because it is shared with the main dictionary. */
     if (dictSize(db->expires) > 0) dictDelete(db->expires,key->ptr);
-    if (dictDelete(db->dict,key->ptr) == DICT_OK) {
-        return 1;
-    } else {
-        return 0;
-    }
+	if (key->notused == REDIS_TRIE_FLAG && trieDelete(db->trie,key->ptr) == DICT_OK) {
+		return 1;
+	}
+	else if (dictDelete(db->dict,key->ptr) == DICT_OK) {
+		return 1;
+	}
+	return 0;
 }
 
 long long emptyDb(void(callback)(void*)) {
@@ -172,7 +203,9 @@ long long emptyDb(void(callback)(void*)) {
 
     for (j = 0; j < server.dbnum; j++) {
         removed += dictSize(server.db[j].dict);
+		removed += trieSize(server.db[j].trie);
         dictEmpty(server.db[j].dict,callback);
+		trieEmpty(server.db[j].trie,callback);
         dictEmpty(server.db[j].expires,callback);
     }
     return removed;
@@ -208,8 +241,10 @@ void signalFlushedDb(int dbid) {
 
 void flushdbCommand(redisClient *c) {
     server.dirty += dictSize(c->db->dict);
+	server.dirty += trieSize(c->db->trie);
     signalFlushedDb(c->db->id);
     dictEmpty(c->db->dict,NULL);
+	trieEmpty(c->db->trie,NULL);
     dictEmpty(c->db->expires,NULL);
     addReply(c,shared.ok);
 }
@@ -283,30 +318,60 @@ void randomkeyCommand(redisClient *c) {
 }
 
 void keysCommand(redisClient *c) {
-    dictIterator *di;
-    dictEntry *de;
-    sds pattern = c->argv[1]->ptr;
-    int plen = sdslen(pattern), allkeys;
-    unsigned long numkeys = 0;
-    void *replylen = addDeferredMultiBulkLength(c);
+	long long start = ustime();
+	dictIterator *di;
+	dictEntry *de;
+	sds pattern = c->argv[1]->ptr;
+	int plen = sdslen(pattern), allkeys;
+	unsigned long numkeys = 0;
+	void *replylen = addDeferredMultiBulkLength(c);
 
-    di = dictGetSafeIterator(c->db->dict);
-    allkeys = (pattern[0] == '*' && pattern[1] == '\0');
-    while((de = dictNext(di)) != NULL) {
-        sds key = dictGetKey(de);
-        robj *keyobj;
+	di = dictGetSafeIterator(c->db->dict);
+	allkeys = (pattern[0] == '*' && pattern[1] == '\0');
+	while((de = dictNext(di)) != NULL) {
+		sds key = dictGetKey(de);
+		robj *keyobj;
 
-        if (allkeys || stringmatchlen(pattern,plen,key,sdslen(key),0)) {
-            keyobj = createStringObject(key,sdslen(key));
-            if (expireIfNeeded(c->db,keyobj) == 0) {
-                addReplyBulk(c,keyobj);
-                numkeys++;
-            }
-            decrRefCount(keyobj);
-        }
-    }
-    dictReleaseIterator(di);
-    setDeferredMultiBulkLength(c,replylen,numkeys);
+		if (allkeys || stringmatchlen(pattern,plen,key,sdslen(key),0)) {
+			keyobj = createStringObject(key,sdslen(key));
+			if (expireIfNeeded(c->db,keyobj) == 0) {
+				addReplyBulk(c,keyobj);
+				numkeys++;
+			}
+			decrRefCount(keyobj);
+		}
+	}
+	dictReleaseIterator(di);
+	setDeferredMultiBulkLength(c,replylen,numkeys);
+	printf("keys cmd use %lld nano secs\n",ustime()-start);
+}
+
+/* support prefix search
+* >tkeys *
+* >tkeys xxx*
+* character after '*' will be ignored */
+void tkeysCommand(redisClient *c) {
+	long long start = ustime();
+	trieIterator *di;
+	trieEntry *de;
+	sds pattern = c->argv[1]->ptr;
+	//int plen = sdslen(pattern), allkeys;
+	unsigned long numkeys = 0;
+	void *replylen = addDeferredMultiBulkLength(c);
+
+	di = triePrefixSearch(c->db->trie,pattern);
+	while((de = trieNext(di)) != NULL) {
+		sds key = trieGetKey(de);
+		robj *keyobj = createStringObject(key,sdslen(key));
+		if (expireIfNeeded(c->db,keyobj) == 0) {
+			addReplyBulk(c,keyobj);
+			numkeys++;
+		}
+		decrRefCount(keyobj);
+	}
+	trieReleaseIterator(di);
+	setDeferredMultiBulkLength(c,replylen,numkeys);
+	printf("tkeys cmd use %lld nano secs\n",ustime()-start);
 }
 
 /* This callback is used by scanGenericCommand in order to collect elements
@@ -552,13 +617,14 @@ void scanCommand(redisClient *c) {
 }
 
 void dbsizeCommand(redisClient *c) {
-    addReplyLongLong(c,dictSize(c->db->dict));
+    addReplyLongLong(c,dictSize(c->db->dict)+trieSize(c->db->trie));
 }
 
 void lastsaveCommand(redisClient *c) {
     addReplyLongLong(c,server.lastsave);
 }
 
+//TODO 输入key未指定类型
 void typeCommand(redisClient *c) {
     robj *o;
     char *type;
@@ -703,7 +769,10 @@ void moveCommand(redisClient *c) {
 int removeExpire(redisDb *db, robj *key) {
     /* An expire may only be removed if there is a corresponding entry in the
      * main dict. Otherwise, the key will never be freed. */
-    redisAssertWithInfo(NULL,key,dictFind(db->dict,key->ptr) != NULL);
+    if (key->notused == REDIS_TRIE_FLAG)
+    	redisAssertWithInfo(NULL,key,trieFind(db->trie,key->ptr) != NULL);
+  	else 
+    	redisAssertWithInfo(NULL,key,dictFind(db->dict,key->ptr) != NULL);
     return dictDelete(db->expires,key->ptr) == DICT_OK;
 }
 
@@ -711,10 +780,18 @@ void setExpire(redisDb *db, robj *key, long long when) {
     dictEntry *kde, *de;
 
     /* Reuse the sds from the main dict in the expire dict */
-    kde = dictFind(db->dict,key->ptr);
+	if (key->notused == REDIS_TRIE_FLAG) {
+		trieEntry *te = trieFind(db->trie,key->ptr);
+		redisAssertWithInfo(NULL,key,te != NULL);
+		de = dictReplaceRaw(db->expires,trieGetKey(te));
+    dictSetSignedIntegerVal(de,when);
+	}
+	else {
+		kde = dictFind(db->dict,key->ptr);
     redisAssertWithInfo(NULL,key,kde != NULL);
     de = dictReplaceRaw(db->expires,dictGetKey(kde));
     dictSetSignedIntegerVal(de,when);
+  }
 }
 
 /* Return the expire time of the specified key, or -1 if no expire
@@ -897,18 +974,23 @@ void pttlCommand(redisClient *c) {
 
 void persistCommand(redisClient *c) {
     dictEntry *de;
-
-    de = dictFind(c->db->dict,c->argv[1]->ptr);
-    if (de == NULL) {
-        addReply(c,shared.czero);
-    } else {
-        if (removeExpire(c->db,c->argv[1])) {
-            addReply(c,shared.cone);
-            server.dirty++;
-        } else {
-            addReply(c,shared.czero);
-        }
-    }
+    trieEntry *te;
+	robj *key = c->argv[1];
+	if (key->notused == REDIS_TRIE_FLAG)
+		te = trieFind(c->db->trie,key);
+	else
+		de = dictFind(c->db->dict,key);
+	
+  if ((key->notused == REDIS_TRIE_FLAG && te == NULL) || (key->notused != REDIS_TRIE_FLAG && de == NULL)) {
+      addReply(c,shared.czero);
+  } else {
+      if (removeExpire(c->db,key)) {
+          addReply(c,shared.cone);
+          server.dirty++;
+      } else {
+          addReply(c,shared.czero);
+      }
+  }
 }
 
 /* -----------------------------------------------------------------------------

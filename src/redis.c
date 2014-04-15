@@ -257,7 +257,30 @@ struct redisCommand redisCommandTable[] = {
     {"script",scriptCommand,-2,"ras",0,NULL,0,0,0,0,0},
     {"time",timeCommand,1,"rR",0,NULL,0,0,0,0,0},
     {"bitop",bitopCommand,-4,"wm",0,NULL,2,-1,1,0,0},
-    {"bitcount",bitcountCommand,-2,"r",0,NULL,1,1,1,0,0}
+    {"bitcount",bitcountCommand,-2,"r",0,NULL,1,1,1,0,0},
+    /* trie commands */
+    {"tget",tgetCommand,2,"r",0,NULL,1,1,1,0,0},
+    {"tset",tsetCommand,-3,"wm",0,noPreloadGetKeys,1,1,1,0,0},
+    {"tsetnx",tsetnxCommand,3,"wm",0,noPreloadGetKeys,1,1,1,0,0},
+    {"tsetex",tsetexCommand,4,"wm",0,noPreloadGetKeys,1,1,1,0,0},
+    {"ptsetex",ptsetexCommand,4,"wm",0,noPreloadGetKeys,1,1,1,0,0},
+    {"tdel",tdelCommand,-2,"w",0,noPreloadGetKeys,1,-1,1,0,0},
+    {"texists",texistsCommand,2,"r",0,NULL,1,1,1,0,0},
+    {"tgetset",tgetsetCommand,3,"wm",0,NULL,1,1,1,0,0},
+    {"tkeys",tkeysCommand,2,"r",0,NULL,0,0,0,0,0},
+    {"thset",thsetCommand,4,"wm",0,NULL,1,1,1,0,0},
+    {"thsetnx",thsetnxCommand,4,"wm",0,NULL,1,1,1,0,0},
+    {"thget",thgetCommand,3,"r",0,NULL,1,1,1,0,0},
+    {"thmset",thmsetCommand,-4,"wm",0,NULL,1,1,1,0,0},
+    {"thmget",thmgetCommand,-3,"r",0,NULL,1,1,1,0,0},
+    {"thincrby",thincrbyCommand,4,"wm",0,NULL,1,1,1,0,0},
+    {"thincrbyfloat",thincrbyfloatCommand,4,"wm",0,NULL,1,1,1,0,0},
+    {"thdel",thdelCommand,-3,"w",0,NULL,1,1,1,0,0},
+    {"thlen",thlenCommand,2,"r",0,NULL,1,1,1,0,0},
+    {"thkeys",thkeysCommand,2,"rS",0,NULL,1,1,1,0,0},
+    {"thvals",thvalsCommand,2,"rS",0,NULL,1,1,1,0,0},
+    {"thgetall",thgetallCommand,2,"r",0,NULL,1,1,1,0,0},
+    {"thexists",thexistsCommand,3,"r",0,NULL,1,1,1,0,0}
 };
 
 /*============================ Utility functions ============================ */
@@ -484,6 +507,189 @@ unsigned int dictEncObjHash(const void *key) {
     }
 }
 
+/*====================== Trie type implementation  ==================== */
+unsigned char * encodingFunction(trieType *type,const void *key)
+{
+	unsigned char *trie_str, *p;
+	unsigned char offset;
+	keyRange *range;
+	int normal;
+	sds keyStr = (sds)key;
+	int len = sdslen(keyStr), j;
+	trie_str = (unsigned char *)zcalloc(len + 1);
+
+	for (p = trie_str,j = 0; j < len; j++)
+	{
+		
+		if (keyStr[j] == '*')
+		{
+			*p++ = '\0';//truncate tkeys's key to handler
+			return trie_str;
+		}
+		
+		normal = 0;
+		offset = 1;
+		for (range = type->range; range; range = range->next) {
+			if (range->begin <= keyStr[j] && keyStr[j] <= range->end)
+			{
+				*p++ = offset + (keyStr[j] - range->begin);
+				normal =  1;
+				break;
+			}
+			offset += range->end - range->begin + 1;
+		}
+		if (normal == 0)
+			*p++ = TRIE_CHAR_MAX;
+	}
+	*p = 0;
+
+	return trie_str;
+}
+
+void * decodingFunction(trieType *type,const unsigned char *internalkey)
+{
+	char  *key, *p;
+	unsigned char offset;
+	keyRange *range;
+	int normal;
+	key = (char *) zmalloc(strlen((const char *)internalkey) + 1);
+	for (p = key; *internalkey; p++, internalkey++) {
+		normal = 0;
+		offset = 1;
+		for (range = type->range; range; range = range->next) {
+			if (*internalkey <= offset + (range->end - range->begin))
+			{
+				*p = range->begin + (*internalkey - offset);
+				normal =  1;
+				break;
+			}
+			offset += range->end - range->begin + 1;
+		}
+		if (normal == 0)
+			*p = ALPHA_CHAR_ERROR;
+	}
+	*p = 0;
+
+	return (void*)key;
+}
+
+int trieKeyCompare(void *privdata, const void *key1,
+					  const void *key2)
+{
+	int l1,l2;
+	DICT_NOTUSED(privdata);
+
+	l1 = sdslen((sds)key1);
+	l2 = sdslen((sds)key2);
+	if (l1 != l2) return 0;
+	return memcmp(key1, key2, l1) == 0;
+}
+
+//void trieDestructor(void *privdata, void *val)
+//{
+//	DICT_NOTUSED(privdata);
+//
+//	sdsfree(val);
+//}
+int addRange (trieType *type, long begin, long end)
+{
+	keyRange *q, *r, *begin_node, *end_node;
+
+	if (begin > end)
+		return -1;
+
+	begin_node = end_node = 0;
+
+	/* Skip first ranges till 'begin' is covered */
+	for (q = 0, r = type->range;
+		r && r->begin <= begin;
+		q = r, r = r->next)
+	{
+		if (begin <= r->end) {
+			/* 'r' covers 'begin' -> take 'r' as beginning point */
+			begin_node = r;
+			break;
+		}
+	}
+	if (!begin_node && r && r->begin <= end) {
+		/* ['begin', 'end'] overlaps into 'r'-begin
+		* -> extend 'r'-begin to include the range
+		*/
+		r->begin = begin;
+		begin_node = r;
+	}
+	/* Run upto the first range that exceeds 'end' */
+	while (r && r->begin <= end) {
+		if (end <= r->end) {
+			/* 'r' covers 'end' -> take 'r' as ending point */
+			end_node = r;
+			break;
+		} else if (r != begin_node) {
+			/* ['begin', 'end'] covers the whole 'r' -> remove 'r' */
+			if (q) {
+				q->next = r->next;
+				zfree(r);
+				r = q->next;
+			} else {
+				type->range = r->next;
+				zfree(r);
+				r = type->range;
+			}
+		} else {
+			q = r;
+			r = r->next;
+		}
+	}
+	if (!end_node && q && begin <= q->end) {
+		/* ['begin', 'end'] overlaps 'q' at the end
+		* -> extend 'q'-end to include the range
+		*/
+		q->end = end;
+		end_node = q;
+	}
+
+	if (begin_node && end_node) {
+		if (begin_node != end_node) {
+			/* Merge begin_node and end_node ranges together */
+			assert (begin_node->next == end_node);
+			begin_node->end = end_node->end;
+			begin_node->next = end_node->next;
+			zfree(end_node);
+		}
+	} else if (!begin_node && !end_node) {
+		/* ['begin', 'end'] overlaps with none of the ranges
+		* -> insert a new range
+		*/
+		keyRange *range = (keyRange *)zmalloc(sizeof (keyRange));
+
+		if (!range)
+			return -1;
+
+		range->begin = begin;
+		range->end   = end;
+
+		/* insert it between 'q' and 'r' */
+		if (q) {
+			q->next = range;
+		} else {
+			type->range = range;
+		}
+		range->next = r;
+	}
+
+	return 0;
+}
+
+int init(trieType *type)
+{
+	//support alphabet & number
+	addRange(type,48,57);
+	addRange(type,65,90);
+	addRange(type,97,122);
+	return 0;
+}
+
+
 /* Sets type hash table */
 dictType setDictType = {
     dictEncObjHash,            /* hash function */
@@ -512,6 +718,18 @@ dictType dbDictType = {
     dictSdsKeyCompare,          /* key compare */
     dictSdsDestructor,          /* key destructor */
     dictRedisObjectDestructor   /* val destructor */
+};
+
+trieType alphaTrieType = {
+	encodingFunction,            /* encode function */
+	decodingFunction,			/* decode function */
+	NULL,                      /* key dup */
+	NULL,                      /* val dup */
+	trieKeyCompare,      /* key compare */
+	dictSdsDestructor, /* key destructor */
+	dictRedisObjectDestructor,	/* val destructor */
+	init,			/* addrange */
+	NULL				/* range */
 };
 
 /* server.lua_scripts sha (as sds string) -> scripts (as robj) cache. */
@@ -1026,13 +1244,15 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     /* Show some info about non-empty databases */
     run_with_period(5000) {
         for (j = 0; j < server.dbnum; j++) {
-            long long size, used, vkeys;
+            long long size, used, vkeys, triesize, trieused;
 
             size = dictSlots(server.db[j].dict);
             used = dictSize(server.db[j].dict);
             vkeys = dictSize(server.db[j].expires);
+			triesize = trieSlots(server.db[j].trie);
+			trieused = trieSize(server.db[j].trie);
             if (used || vkeys) {
-                redisLog(REDIS_VERBOSE,"DB %d: %lld keys (%lld volatile) in %lld slots HT.",j,used,vkeys,size);
+                redisLog(REDIS_VERBOSE,"DB %d: %lld keys in %lld slots HT, %lld keys in %lld slots Trie (%lld volatile).",j,used,size,trieused,triesize,vkeys);
                 /* dictPrintStats(server.dict); */
             }
         }
@@ -1566,6 +1786,7 @@ void initServer() {
     /* Create the Redis databases, and initialize other internal state. */
     for (j = 0; j < server.dbnum; j++) {
         server.db[j].dict = dictCreate(&dbDictType,NULL);
+		server.db[j].trie = trieCreate(&alphaTrieType,NULL);
         server.db[j].expires = dictCreate(&keyptrDictType,NULL);
         server.db[j].blocking_keys = dictCreate(&keylistDictType,NULL);
         server.db[j].ready_keys = dictCreate(&setDictType,NULL);
@@ -2597,7 +2818,7 @@ sds genRedisInfoString(char *section) {
         for (j = 0; j < server.dbnum; j++) {
             long long keys, vkeys;
 
-            keys = dictSize(server.db[j].dict);
+            keys = dictSize(server.db[j].dict) + trieSize(server.db[j].trie);
             vkeys = dictSize(server.db[j].expires);
             if (keys || vkeys) {
                 info = sdscatprintf(info,
