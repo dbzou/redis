@@ -774,7 +774,7 @@ int trieAdd(trie *t, void *key, void *val)
 	long index = _trieAddKey(t,key);//return trieEntry index where set key and value
 	//printf("_trieAddKey ret=%d\n",index);
 
-	if(index == TRIE_INDEX_ERROR || index == TDICT_ERR || index == -1)//TODO:ÕûÀí·µ»ØÖµ
+	if(index == TRIE_INDEX_ERROR || index == TDICT_ERR || index == -1)//TODO:ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Öµ
 		return TDICT_ERR;//add failed
 
 	//set key and value
@@ -922,7 +922,7 @@ trieIterator * triePrefixSearch(trie *t, const void *key)
 
 trieEntry *trieNext(trieIterator *iter)
 {
-	if(iter->result == NULL)
+	if(iter->result == NULL || iter->result->len == 0)
 		return NULL;
 	if(iter->index < 0) {
 		iter->cur = iter->result->head;
