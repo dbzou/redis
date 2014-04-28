@@ -2042,6 +2042,8 @@ void call(redisClient *c, int flags) {
 
     /* Call the command. */
     c->flags &= ~(REDIS_FORCE_AOF|REDIS_FORCE_REPL);
+    if (c->argc > 1)
+        c->argv[1]->notused = 0;//clear trie flag
     redisOpArrayInit(&server.also_propagate);
     dirty = server.dirty;
     start = ustime();
